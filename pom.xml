@@ -24,19 +24,23 @@ limitations under the License.
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.jclouds.examples</groupId>
-  <artifactId>ec2-computeservice-spot</artifactId>
+  <artifactId>ec2-createlamp</artifactId>
   <version>1.0.0</version>
-  <name>ec2-computeservice-spot</name>
-  <description>jclouds ec2 example that creates a spot instance using the ComputeService</description>
+  <name>ec2-createlamp</name>
+  <description>jclouds ec2 example that creates an instance and all you need to access it</description>
 
   <dependencies>
     <dependency>
       <groupId>org.jclouds.provider</groupId>
       <artifactId>aws-ec2</artifactId>
-      <version>1.1.0</version>
+      <version>1.5.0</version>
     </dependency>
+     <dependency>
+        <groupId>org.jclouds.driver</groupId>
+        <artifactId>jclouds-sshj</artifactId>
+        <version>1.5.0</version>
+      </dependency>
   </dependencies>
-
   <build>
     <finalName>${project.artifactId}</finalName>
     <plugins>
@@ -47,7 +51,7 @@ limitations under the License.
         <configuration>
           <archive>
             <manifest>
-              <mainClass>org.jclouds.examples.ec2.spot.MainApp</mainClass>
+              <mainClass>org.jclouds.examples.ec2.createlamp.MainApp</mainClass>
             </manifest>
           </archive>
         </configuration>
@@ -61,7 +65,7 @@ limitations under the License.
           </descriptorRefs>
           <archive>
             <manifest>
-              <mainClass>org.jclouds.examples.ec2.spot.MainApp</mainClass>
+              <mainClass>org.jclouds.examples.ec2.createlamp.MainApp</mainClass>
             </manifest>
           </archive>
         </configuration>
