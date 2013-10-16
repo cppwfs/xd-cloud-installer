@@ -46,6 +46,7 @@ import org.jclouds.rest.RestContext;
 import org.jclouds.scriptbuilder.ScriptBuilder;
 import org.jclouds.scriptbuilder.domain.OsFamily;
 import org.jclouds.sshj.config.SshjSshClientModule;
+import org.spring.springxdcloudInstaller.util.CloudCommand;
 
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableSet;
@@ -65,8 +66,8 @@ import com.google.inject.Module;
 public class MainApp {
 
 	public static int PARAMETERS = 5;
-	public static String INVALID_SYNTAX = "Invalid number of parameters. Syntax is: accesskeyid secretkey command name type \nwhere command in create destroy\n type container, admin, singlenode ";
-
+	public static String INVALID_SYNTAX = "Invalid number of parameters. Syntax is: accesskeyid secretkey command name type \nwhere command in create destroy\n type node, admin, singlenode ";
+	public static String INVALID_TYPE = "Invalid deployment type.  The only valid types are node, admin, singlenode";
 	public static void main(String[] args) throws TimeoutException {
 
 		if (args.length < PARAMETERS)
@@ -78,8 +79,11 @@ public class MainApp {
 		String command = args[2];
 		String name = args[3];
 		String type = args[4];
- 
-		// Init  
+		DeployType deployType= getTypeByString(type);
+		if(deployType == null){
+			throw new IllegalArgumentException(INVALID_TYPE);
+		}
+		// Init
 		RestContext<EC2Client, EC2AsyncClient> context = ContextBuilder
 				.newBuilder("aws-ec2").credentials(accesskeyid, secretkey)
 				.build();
@@ -89,9 +93,9 @@ public class MainApp {
 		try {
 			if (command.equals("create")) {
 
-			KeyPair pair = createKeyPair(client, name);
-				RunningInstance instance = createSecurityGroupKeyPairAndInstance(
-						client, name);
+				KeyPair pair = createKeyPair(client, name);
+				RunningInstance instance = execute(
+						client, name,getTypeByString(type));
 
 				System.out.printf("instance %s ready%n", instance.getId());
 				System.out.printf("ip address: %s%n", instance.getIpAddress());
@@ -142,16 +146,14 @@ public class MainApp {
 		}
 	}
 
-	private static RunningInstance createSecurityGroupKeyPairAndInstance(
-			EC2Client client, String name) throws TimeoutException {
+	private static RunningInstance execute(
+			EC2Client client, String name, DeployType type) throws TimeoutException {
 		System.out.println("about to run the instance.");
 		RunningInstance instance = null;
 		// create a new instance
-		try{
-		 instance = runInstance(client, "default", name);//need to allow them to pass in a specific group or at least the xd group
-		 
-		}
-		catch(RuntimeException e){
+		try {
+			instance = runInstance(client, "default", name,type);
+		} catch (RuntimeException e) {
 			e.printStackTrace();
 			throw e;
 		}
@@ -159,41 +161,40 @@ public class MainApp {
 		return blockUntilInstanceRunning(client, instance);
 	}
 
-
-
 	static KeyPair createKeyPair(EC2Client client, String name) {
 		System.out.printf("%d: creating keypair: %s%n",
 				System.currentTimeMillis(), name);
-		// return client.getKeyPairServices().createKeyPairInRegion(null, name);
 		return client.getKeyPairServices()
 				.describeKeyPairsInRegion(null, "testpair").iterator().next();
 	}
 
 	static RunningInstance runInstance(EC2Client client,
-			String securityGroupName, String keyPairName) {
+			String securityGroupName, String keyPairName, DeployType type) {
 		System.out.println("Base Image is initializing...  Installing XD...");
-        String script = new ScriptBuilder().addStatement(exec("wget -P /home/ubuntu http://repo.springsource.org/libs-snapshot-local/org/springframework/xd/spring-xd/1.0.0.BUILD-SNAPSHOT/spring-xd-1.0.0.BUILD-20131009.122952-1.zip"))
-      		  .addStatement(exec("unzip /home/ubuntu/spring-xd-1.0.0.BUILD-20131009.122952-1.zip -d /home/ubuntu"))
-      		  .addStatement(exec("/etc/init.d/redis-server start"))
-      		  .addStatement(exec("/etc/init.d/rabbitmq-server start"))
-      		  .addStatement(exec("/home/ubuntu/spring-xd-1.0.0.BUILD-SNAPSHOT/xd/bin/xd-singlenode &"))
-      		  .render(OsFamily.UNIX);
+		String script = null;
+		if(type == DeployType.SINGLE_NODE){
+			script = CloudCommand.getSingleNodeScripts();
+		}else if(type == DeployType.ADMIN){
+			script = CloudCommand.getAdminScripts();
+		}else if(type ==  DeployType.NODE){
+			script = CloudCommand.getContainerScripts();
+		}
 
 		System.out.printf("%d: running instance%n", System.currentTimeMillis());
- 
+
 		Reservation<? extends RunningInstance> reservation = client
-				.getInstanceServices().runInstancesInRegion(null, null, 
+				.getInstanceServices().runInstancesInRegion(null,
+						null,
 						"ami-3f134156", // XD Basic Image.
 						1, // minimum instances
 						1, // maximum instances
-						asType(InstanceType.M1_SMALL) // smallest instance size
-								.withKeyName(keyPairName) // key I created above
-								.withSecurityGroup(securityGroupName) // group I
-																		// created
-																		// above
-								.withUserData(script.getBytes())); // script to
-																	// run as
-						 											// root
+						asType(InstanceType.M1_SMALL)
+								// smallest instance size
+								.withKeyName(keyPairName)
+								// key I created above
+								.withSecurityGroup(securityGroupName)
+								.withUserData(script.getBytes()));
+
 		return Iterables.getOnlyElement(reservation);
 
 	}
@@ -209,7 +210,7 @@ public class MainApp {
 		if (!runningTester.apply(instance))
 			throw new TimeoutException("timeout waiting for instance to run: "
 					+ instance.getId());
- 
+
 		instance = findInstanceById(client, instance.getId());
 
 		RetryablePredicate<HostAndPort> socketTester = new RetryablePredicate<HostAndPort>(
@@ -270,62 +271,18 @@ public class MainApp {
 
 		});
 	}
-
-	private static ComputeService setupService(String name, String password){
-	      Iterable<Module> modules = ImmutableSet.<Module> of(new SshjSshClientModule());
-
-	      // These properties control how often jclouds polls for a status udpate
-	      ComputeServiceContext context = ContextBuilder.newBuilder("aws-ec2")
-	    		  .credentials(name, password) // key I created above
-	            .modules(modules)
-	            .buildView(ComputeServiceContext.class);
-	      ComputeService computeService = context.getComputeService();
-	      Iterator nodes = computeService.listNodes().iterator();
-	      while (nodes.hasNext()){
-	    	  org.jclouds.compute.domain.internal.NodeMetadataImpl data = (org.jclouds.compute.domain.internal.NodeMetadataImpl)nodes.next(); 
-		      System.out.println(data.getClass().getName());
-		      System.out.println(data.getHostname());
-		      System.out.println(data.toString());
-		      if(data.getHostname() !=null){
-		          String script = new ScriptBuilder().addStatement(exec("wget -P /home/ubuntu http://repo.springsource.org/libs-snapshot-local/org/springframework/xd/spring-xd/1.0.0.BUILD-SNAPSHOT/spring-xd-1.0.0.BUILD-20131009.122952-1.zip"))
-		        		  .addStatement(exec("unzip /home/ubuntu/spring-xd-1.0.0.BUILD-20131009.122952-1.zip -d /home/ubuntu"))
-		        		  .addStatement(exec("/home/ubuntu/spring-xd-1.0.0.BUILD-SNAPSHOT/xd/bin/xd-singlenode &"))
-		        		  .render(OsFamily.UNIX);
-		           try{
-		            RunScriptOptions options = RunScriptOptions.Builder.blockOnComplete(true).overrideLoginUser("ubuntu").overrideLoginPrivateKey(getTestPair());
-		            options.runAsRoot(false);
-		            ExecResponse resp = computeService.runScriptOnNode(data.getId(), script, options);
-		            System.out.println(resp.getOutput());
-		            System.out.println(resp.getError());
-		            System.out.println(resp.getExitStatus());
-		           }catch(Exception re){
-		        	   re.printStackTrace();
-		           }
-		      }
-
-	      }
-	return computeService;	
-	}
-	private static String getTestPair(){
-		String result = "";
-		BufferedReader br= null;
-		try{
-			br = new BufferedReader(new FileReader("/Users/renfrg/ec2/testpair.pem"));
-			while(br.ready()){
-				result+=br.readLine()+"\n";
-			}
-		}catch(Exception ex){
-			ex.printStackTrace();
-		}finally{
-			if(br != null){
-				try{
-					br.close();
-				}catch(Exception ex){
-					ex.printStackTrace();
-				}
-			}
+	private static DeployType getTypeByString(String type){
+		DeployType result = null;
+		if(type.equalsIgnoreCase("singlenode")){
+			result = DeployType.SINGLE_NODE;
+		}else if(type.equalsIgnoreCase("node")){
+			result = DeployType.NODE;
+		}else if(type.equalsIgnoreCase("admin")){
+			result = DeployType.ADMIN;
 		}
-		System.out.println(result);
 		return result;
+	}
+	private enum DeployType{
+		ADMIN,SINGLE_NODE, NODE
 	}
 }
