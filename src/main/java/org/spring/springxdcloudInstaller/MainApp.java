@@ -16,26 +16,17 @@
 
 package org.spring.springxdcloudInstaller;
 
-import static org.jclouds.ec2.options.RunInstancesOptions.Builder.asType;
-import static org.jclouds.scriptbuilder.domain.Statements.exec;
-
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.util.Iterator;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.jclouds.ContextBuilder;
-import org.jclouds.compute.ComputeService;
-import org.jclouds.compute.ComputeServiceContext;
-import org.jclouds.compute.domain.ExecResponse;
-import org.jclouds.compute.options.RunScriptOptions;
 import org.jclouds.ec2.EC2AsyncClient;
 import org.jclouds.ec2.EC2Client;
 import org.jclouds.ec2.domain.InstanceState;
-import org.jclouds.ec2.domain.InstanceType;
 import org.jclouds.ec2.domain.KeyPair;
 import org.jclouds.ec2.domain.Reservation;
 import org.jclouds.ec2.domain.RunningInstance;
@@ -43,17 +34,20 @@ import org.jclouds.ec2.predicates.InstanceStateRunning;
 import org.jclouds.predicates.InetSocketAddressConnect;
 import org.jclouds.predicates.RetryablePredicate;
 import org.jclouds.rest.RestContext;
-import org.jclouds.scriptbuilder.ScriptBuilder;
-import org.jclouds.scriptbuilder.domain.OsFamily;
-import org.jclouds.sshj.config.SshjSshClientModule;
 import org.spring.springxdcloudInstaller.util.CloudCommand;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.CommonsClientHttpRequestFactory;
+import org.springframework.http.converter.FormHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.StringHttpMessageConverter;
+import org.springframework.http.converter.json.MappingJacksonHttpMessageConverter;
+import org.springframework.web.client.RestTemplate;
+import org.w3c.dom.events.Event;
 
 import com.google.common.base.Predicate;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import com.google.common.net.HostAndPort;
-import com.google.inject.Module;
 
 /**
  * This the Main class of an Application that installs XD onto a cloud platform.
@@ -67,7 +61,7 @@ public class MainApp {
 
 	public static int PARAMETERS = 5;
 	public static String INVALID_SYNTAX = "Invalid number of parameters. Syntax is: accesskeyid secretkey command name type \nwhere command in create destroy\n type node, admin, singlenode ";
-	public static String INVALID_TYPE = "Invalid deployment type.  The only valid types are node, admin, singlenode";
+	public static String INVALID_TYPE = "Invalid deployment type.  The only valid types are multinode singlenode";
 	public static void main(String[] args) throws TimeoutException {
 
 		if (args.length < PARAMETERS)
@@ -90,25 +84,27 @@ public class MainApp {
 
 		// Get a synchronous client
 		EC2Client client = context.getApi();
+		CloudCommand cloudCommand = new CloudCommand(accesskeyid, secretkey);
 		try {
 			if (command.equals("create")) {
+//				cloudCommand.runCommand("mkdir -p /home/ubuntu/org/spring/springxdcloudInstaller/util", "us-east-1/i-e16ae686");
+//				cloudCommand.sshCopy("/Users/renfrg/projects/xd-cloud-installer/target/classes/org/spring/springxdcloudInstaller/util/ConfigureSystem.class",
+//						"ec2-50-16-90-175.compute-1.amazonaws.com","us-east-1/i-e16ae686");
+//				cloudCommand.runCommand("java -cp /home/ubuntu org.spring.springxdcloudInstaller.util.ConfigureSystem ", "us-east-1/i-e16ae686");
 
-				KeyPair pair = createKeyPair(client, name);
-				RunningInstance instance = execute(
-						client, name,getTypeByString(type));
+				execute(client, name,getTypeByString(type),cloudCommand);
+				System.out.println(getLatestBuild());
 
-				System.out.printf("instance %s ready%n", instance.getId());
-				System.out.printf("ip address: %s%n", instance.getIpAddress());
-				System.out.printf("dns name: %s%n", instance.getDnsName());
-				System.out.printf("login identity:%n%s%n",
-						pair.getKeyMaterial());
 			} else if (command.equals("destroy")) {
 				destroySecurityGroupKeyPairAndInstance(client, name);
 			} else {
 				throw new IllegalArgumentException(INVALID_SYNTAX);
 			}
-		} finally {
-			// Close connection
+		} catch(Exception ex){
+			ex.printStackTrace();
+		}
+		finally {
+		// Close connection
 			context.close();
 			System.exit(0);
 		}
@@ -146,19 +142,17 @@ public class MainApp {
 		}
 	}
 
-	private static RunningInstance execute(
-			EC2Client client, String name, DeployType type) throws TimeoutException {
+	private static void execute(
+			EC2Client client, String name, DeployType type,CloudCommand cloudCommand) throws TimeoutException {
 		System.out.println("about to run the instance.");
 		RunningInstance instance = null;
 		// create a new instance
 		try {
-			instance = runInstance(client, "default", name,type);
+			deployXD(client, "xd-open-security-group", name,type,cloudCommand);
 		} catch (RuntimeException e) {
 			e.printStackTrace();
 			throw e;
 		}
-		// await for the instance to start
-		return blockUntilInstanceRunning(client, instance);
 	}
 
 	static KeyPair createKeyPair(EC2Client client, String name) {
@@ -168,38 +162,44 @@ public class MainApp {
 				.describeKeyPairsInRegion(null, "testpair").iterator().next();
 	}
 
-	static RunningInstance runInstance(EC2Client client,
-			String securityGroupName, String keyPairName, DeployType type) {
+	static  void deployXD(EC2Client client,
+			String securityGroupName, String keyPairName, DeployType type, CloudCommand cloudCommand) throws TimeoutException{
 		System.out.println("Base Image is initializing...  Installing XD...");
 		String script = null;
+		RunningInstance runningInstance = null;
 		if(type == DeployType.SINGLE_NODE){
 			script = CloudCommand.getSingleNodeScripts();
-		}else if(type == DeployType.ADMIN){
+			runningInstance = Iterables.getOnlyElement(CloudCommand.runInstance(client, securityGroupName, keyPairName, script));
+			blockAdminInstanceRunning(client,runningInstance);
+			System.out.println("Waiting for SINGLE NODE to start "+runningInstance.getId());
+
+		}else if(type == DeployType.MULTI_NODE){
+			System.out.println("Starting Admin Server");
 			script = CloudCommand.getAdminScripts();
-		}else if(type ==  DeployType.NODE){
+			runningInstance = Iterables.getOnlyElement(CloudCommand.runInstance(client, securityGroupName, keyPairName, script));
+			blockAdminInstanceRunning(client,runningInstance);
+			String dirtDns = findInstanceById(client, runningInstance.getId()).getDnsName();
+			System.out.println("Starting Dirt "+dirtDns);
+
 			script = CloudCommand.getContainerScripts();
+			runningInstance = Iterables.getOnlyElement(CloudCommand.runInstance(client, securityGroupName, keyPairName, script));
+			blockNodeInstanceRunning(client,runningInstance);
+			runningInstance = findInstanceById(client, runningInstance.getId());
+			System.out.println("Starting Node 1 "+runningInstance.getDnsName());
+			String nodeId = "us-east-1/"+runningInstance.getId();
+			
+			cloudCommand.runCommand("mkdir -p /home/ubuntu/org/spring/springxdcloudInstaller/util", nodeId);
+			cloudCommand.sshCopy("/Users/renfrg/projects/xd-cloud-installer/target/classes/org/spring/springxdcloudInstaller/util/ConfigureSystem.class",
+					runningInstance.getDnsName(),nodeId);
+			cloudCommand.runCommand("java -cp /home/ubuntu org.spring.springxdcloudInstaller.util.ConfigureSystem ", nodeId);
+
 		}
 
 		System.out.printf("%d: running instance%n", System.currentTimeMillis());
-
-		Reservation<? extends RunningInstance> reservation = client
-				.getInstanceServices().runInstancesInRegion(null,
-						null,
-						"ami-3f134156", // XD Basic Image.
-						1, // minimum instances
-						1, // maximum instances
-						asType(InstanceType.M1_SMALL)
-								// smallest instance size
-								.withKeyName(keyPairName)
-								// key I created above
-								.withSecurityGroup(securityGroupName)
-								.withUserData(script.getBytes()));
-
-		return Iterables.getOnlyElement(reservation);
-
 	}
 
-	static RunningInstance blockUntilInstanceRunning(EC2Client client,
+
+	static RunningInstance blockAdminInstanceRunning(EC2Client client,
 			RunningInstance instance) throws TimeoutException {
 		// create utilities that wait for the instance to finish
 		RetryablePredicate<RunningInstance> runningTester = new RetryablePredicate<RunningInstance>(
@@ -234,6 +234,43 @@ public class MainApp {
 
 		System.out.printf("%d: %s http service started%n",
 				System.currentTimeMillis(), instance.getIpAddress());
+		System.out.printf("instance %s ready%n", instance.getId());
+		System.out.printf("ip address: %s%n", instance.getIpAddress());
+		System.out.printf("dns name: %s%n", instance.getDnsName());
+		return instance;
+	}
+	
+	static RunningInstance blockNodeInstanceRunning(EC2Client client,
+			RunningInstance instance) throws TimeoutException {
+		// create utilities that wait for the instance to finish
+		RetryablePredicate<RunningInstance> runningTester = new RetryablePredicate<RunningInstance>(
+				new InstanceStateRunning(client), 180, 5, TimeUnit.SECONDS);
+
+		System.out.printf("%d: %s awaiting instance to run %n",
+				System.currentTimeMillis(), instance.getId());
+		if (!runningTester.apply(instance))
+			throw new TimeoutException("timeout waiting for instance to run: "
+					+ instance.getId());
+
+		instance = findInstanceById(client, instance.getId());
+
+		RetryablePredicate<HostAndPort> socketTester = new RetryablePredicate<HostAndPort>(
+				new InetSocketAddressConnect(), 300, 1, TimeUnit.SECONDS);
+		System.out.printf("%d: %s awaiting ssh service to start%n",
+				System.currentTimeMillis(), instance.getIpAddress());
+		if (!socketTester.apply(HostAndPort.fromParts(instance.getIpAddress(),
+				22)))
+			throw new TimeoutException("timeout waiting for ssh to start: "
+					+ instance.getIpAddress());
+
+		System.out.printf("%d: %s ssh service started%n",
+				System.currentTimeMillis(), instance.getIpAddress());
+
+		System.out.printf("%d: %s http service started%n",
+				System.currentTimeMillis(), instance.getIpAddress());
+		System.out.printf("instance %s ready%n", instance.getId());
+		System.out.printf("ip address: %s%n", instance.getIpAddress());
+		System.out.printf("dns name: %s%n", instance.getDnsName());
 		return instance;
 	}
 
@@ -275,14 +312,18 @@ public class MainApp {
 		DeployType result = null;
 		if(type.equalsIgnoreCase("singlenode")){
 			result = DeployType.SINGLE_NODE;
-		}else if(type.equalsIgnoreCase("node")){
-			result = DeployType.NODE;
-		}else if(type.equalsIgnoreCase("admin")){
-			result = DeployType.ADMIN;
+		}else if(type.equalsIgnoreCase("multinode")){
+			result = DeployType.MULTI_NODE;
 		}
 		return result;
 	}
 	private enum DeployType{
-		ADMIN,SINGLE_NODE, NODE
+		SINGLE_NODE, MULTI_NODE
+	}
+	private static String getLatestBuild(){
+		RestTemplate restTemplate = new RestTemplate();
+		ResponseEntity<String> s = restTemplate.getForEntity("http://repo.springsource.org/libs-snapshot-local/org/springframework/xd/spring-xd/1.0.0.BUILD-SNAPSHOT/",String.class);
+
+		return s.getBody();
 	}
 }

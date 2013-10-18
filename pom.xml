@@ -40,6 +40,21 @@ limitations under the License.
         <artifactId>jclouds-sshj</artifactId>
         <version>1.5.0</version>
       </dependency>
+      <dependency>
+		<groupId>org.springframework</groupId>
+		<artifactId>spring-context</artifactId>
+		<version>3.2.4.RELEASE</version>
+	  </dependency>
+	  <dependency>
+		<groupId>org.springframework</groupId>
+		<artifactId>spring-web</artifactId>
+		<version>3.2.4.RELEASE</version>
+	  </dependency>
+<dependency>
+	<groupId>org.jclouds</groupId>
+	<artifactId>jclouds-antcontrib</artifactId>
+	<version>1.5.0</version>
+</dependency>
   </dependencies>
   <build>
     <finalName>${project.artifactId}</finalName>
